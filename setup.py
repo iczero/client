@@ -50,6 +50,7 @@ for module in ["invoke.py", "load_plugin.py"]:
 import PyQt5.uic
 build_exe_options = {
     'include_files': ['res',
+                      'faf-ice-adapter',
                       'imageformats',
                       'platforms',
                       'libeay32.dll',

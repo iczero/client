@@ -4,7 +4,6 @@ from PyQt5.QtCore import QUrl, QProcess
 from PyQt5.QtWidgets import QLabel
 
 import config
-import connectivity
 from config import Settings
 import chat
 from client.player import Player
@@ -16,11 +15,10 @@ from client.updater import ClientUpdater, GithubUpdateChecker
 from client.theme_menu import ThemeMenu
 from client.user import User
 import fa
-from connectivity.helper import ConnectivityHelper
-from fa import GameSession
 from fa.factions import Factions
 from fa.maps import getUserMapsFolder
 from modvault.utils import MODFOLDER
+from fa.game_session import GameSession, GameSessionState
 from ui.status_logo import StatusLogo
 from client.login import LoginWidget
 from ui.busy_widget import BusyWidget
@@ -142,6 +140,7 @@ class ClientWindow(FormClass, BaseClass):
 
         self._state = ClientState.NONE
         self.session = None
+        self.game_session = None
 
         # This dictates whether we login automatically in the beginning or
         # after a disconnect. We turn it on if we're sure we have correct
@@ -181,9 +180,6 @@ class ClientWindow(FormClass, BaseClass):
 
         # Local Replay Server
         self.replayServer = fa.replayserver.ReplayServer(self)
-
-        # GameSession
-        self.game_session = None  # type: GameSession
 
         # ConnectivityTest
         self.connectivity = None  # type: ConnectivityHelper
@@ -667,6 +663,11 @@ class ClientWindow(FormClass, BaseClass):
             progress.setLabelText("Removing UPnP port mappings")
             fa.upnp.removePortMappings()
 
+        # Close game session (and stop faf-ice-adapter.exe)
+        if self.game_session:
+            self.game_session.close()
+            self.game_session = None
+
         # Terminate local ReplayServer
         if self.replayServer:
             progress.setLabelText("Terminating local replay server")
@@ -695,6 +696,7 @@ class ClientWindow(FormClass, BaseClass):
     def closeEvent(self, event):
         logger.info("Close Event for Application Main Window")
         self.saveWindow()
+        self.game_session.close()
 
         if fa.instance.running():
             if QtWidgets.QMessageBox.question(self, "Are you sure?",
@@ -1122,14 +1124,10 @@ class ClientWindow(FormClass, BaseClass):
 
         self.authorized.emit(self.me.player)
 
-        # Run an initial connectivity test and initialize a gamesession object
-        # when done
-        self.connectivity = ConnectivityHelper(self, self.gamePort)
-        self.connectivity.connectivity_status_established.connect(self.initialize_game_session)
-        self.connectivity.start_test()
-
-    def initialize_game_session(self):
-        self.game_session = GameSession(self, self.connectivity)
+        if not self.game_session:
+            self.game_session = GameSession(player_id=message["id"],
+                                            player_login=message["login"])
+            logger.debug("game_session created")
 
     def handle_registration_response(self, message):
         if message["result"] == "SUCCESS":
@@ -1138,63 +1136,38 @@ class ClientWindow(FormClass, BaseClass):
         self.handle_notice({"style": "notice", "text": message["error"]})
 
     def search_ranked(self, faction):
-        def request_launch():
-            msg = {
-                'command': 'game_matchmaking',
-                'mod': 'ladder1v1',
-                'state': 'start',
-                'gameport': self.gamePort,
-                'faction': faction
-            }
-            if self.connectivity.state == 'STUN':
-                msg['relay_address'] = self.connectivity.relay_address
-            self.lobby_connection.send(msg)
-            self.game_session.ready.disconnect(request_launch)
-        if self.game_session:
-            self.game_session.ready.connect(request_launch)
-            self.game_session.listen()
+        msg = {
+            'command': 'game_matchmaking',
+            'mod': 'ladder1v1',
+            'state': 'start',
+            'gameport': 0,
+            'faction': faction
+        }
+        self.lobby_connection.send(msg)
 
     def host_game(self, title, mod, visibility, mapname, password, is_rehost=False):
-        def request_launch():
-            msg = {
-                'command': 'game_host',
-                'title': title,
-                'mod': mod,
-                'visibility': visibility,
-                'mapname': mapname,
-                'password': password,
-                'is_rehost': is_rehost
-            }
-            if self.connectivity.state == 'STUN':
-                msg['relay_address'] = self.connectivity.relay_address
-            self.lobby_connection.send(msg)
-            self.game_session.ready.disconnect(request_launch)
-        if self.game_session:
-            self.game_session.game_password = password
-            self.game_session.ready.connect(request_launch)
-            self.game_session.listen()
+        msg = {
+            'command': 'game_host',
+            'title': title,
+            'mod': mod,
+            'visibility': visibility,
+            'mapname': mapname,
+            'password': password,
+            'is_rehost': is_rehost
+        }
+        self.lobby_connection.send(msg)
 
     def join_game(self, uid, password=None):
-        def request_launch():
-            msg = {
-                'command': 'game_join',
-                'uid': uid,
-                'gameport': self.gamePort
-            }
-            if password:
-                msg['password'] = password
-            if self.connectivity.state == "STUN":
-                msg['relay_address'] = self.connectivity.relay_address
-            self.lobby_connection.send(msg)
-            self.game_session.ready.disconnect(request_launch)
-        if self.game_session:
-            self.game_session.game_password = password
-            self.game_session.ready.connect(request_launch)
-            self.game_session.listen()
+        msg = {
+            'command': 'game_join',
+            'uid': uid,
+            'gameport': 0
+        }
+        if password:
+            msg['password'] = password
+        self.lobby_connection.send(msg)
 
     def handle_game_launch(self, message):
-        if not self.game_session or not self.connectivity.is_ready:
-            logger.error("Not ready for game launch")
 
         logger.info("Handling game_launch via JSON " + str(message))
 
@@ -1215,8 +1188,7 @@ class ClientWindow(FormClass, BaseClass):
             arguments.append('/team 1')     # Always FFA team
 
             # Launch the auto lobby
-            self.game_session.init_mode = 1
-
+            self.game_session.setLobbyInitMode("auto")
         else:
             # Player global rating
             arguments.append('/mean')
@@ -1228,7 +1200,7 @@ class ClientWindow(FormClass, BaseClass):
                 arguments.append(self.me.player.country)
 
             # Launch the normal lobby
-            self.game_session.init_mode = 0
+            self.game_session.setLobbyInitMode("normal")
 
         if self.me.player.clan is not None:
             arguments.append('/clan')
