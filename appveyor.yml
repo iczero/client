@@ -47,7 +47,8 @@ install:
   - ps: "$env:PYTEST_QT_API=\"pyqt5\""
   - ps: "$env:FAF_FORCE_PRODUCTION=true"
   - ps: "Invoke-WebRequest -Uri \"https://github.com/FAForever/uid/releases/download/$($env:UID_VERSION)/faf-uid.exe\" -OutFile \".\\lib\\faf-uid.exe\""
-
+  - ps: "(Invoke-WebRequest -Uri https://api.github.com/repos/FAForever/ice-adapter/releases/latest -Headers $headers  | ConvertFrom-Json).assets | where {$_.name -like \"faf-ice-adapter-win32-*.zip\"} | %{ iwr $_.browser_download_url -OutFile \".\\faf-ice-adapter.zip\"}"
+  - ps: Expand-Archive .\\faf-ice-adapter.zip -DestinationPath .
 test_script:
   - "%PYTHON%\\python runtests.py -vv --full-trace"
 
